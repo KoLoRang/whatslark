@@ -1,0 +1,18 @@
+node_modules/
+dist/
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+*.log
+.DS_Store
+
+# tests
+test/
+tsconfig.test.json
+
+# dev artifacts
+diff.patch
+spec/

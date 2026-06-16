@@ -1,0 +1,16 @@
+services:
+  whatslark:
+    build: .
+    image: whatslark:latest
+    container_name: whatslark
+    restart: always # 崩溃/重启自动拉起，保证常驻
+    # 无需端口映射：去掉了 Web 配置页，飞书走出站长连接，配置通过 ./data/config.json + docker exec whatslark
+    volumes:
+      - ./data:/data # SQLite + WA authState + config.json + cmd/ + status.json 全部挂宿主机
+    environment:
+      - DATA_DIR=/data
+      - DB_PATH=/data/bridge.db
+      - TZ=Asia/Shanghai
+      - NODE_ENV=production
+    stdin_open: true   # 保留 TTY，便于终端 QR 展示
+    tty: true
