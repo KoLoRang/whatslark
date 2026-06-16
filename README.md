@@ -1,39 +1,73 @@
-# WhatsLark · WhatsApp ↔ 飞书 群消息双向同步
+# WhatsLark · WhatsApp ↔ 飞书双向消息同步
 
-把一个 WhatsApp 账号里的**每个群聊**自动在飞书建一个对应群，**所有私聊**归集到一个飞书话题群（每个联系人一个话题），消息**双向实时同步**：
+WhatsLark 是一个单进程消息桥，用于把 WhatsApp 群聊与私聊同步到飞书，并把飞书里的回复发回 WhatsApp。
 
-- WhatsApp 群/私聊新消息 → 飞书（自动建群/建话题）
-- 我在飞书里的回复 → 以**我本人 WA 账号**名义发回对应 WhatsApp 群/私聊
-- 支持 **文本 + 图片 + 文件 + 语音**；支持 WA 群改名同步；登录后一次性全量建群 + 历史消息归集
+- **群聊同步**：每个 WhatsApp 群自动映射到一个独立飞书群。
+- **私聊归集**：所有 WhatsApp 私聊归集到一个飞书话题群，每个联系人对应一个话题。
+- **双向实时同步**：WhatsApp 新消息同步到飞书；飞书回复会以你的 WhatsApp 账号身份发回对应会话。
+- **媒体支持**：支持文本、图片、文件、语音；不支持的消息类型会降级为文本提示。
+- **文件化运维**：无 Web 页面，通过配置文件、状态文件和容器内 CLI 管理。
 
 ---
 
 ## 技术栈
 
-Node.js 20+ / TypeScript · [Baileys](https://baileys.wiki)（WhatsApp）· [@larksuiteoapi/node-sdk](https://github.com/larksuite/node-sdk)（飞书 Client + 长连接 WSClient）· SQLite（better-sqlite3）· Docker。
+- Runtime：Node.js 20+ / TypeScript
+- WhatsApp：[@whiskeysockets/baileys](https://baileys.wiki)
+- 飞书：[@larksuiteoapi/node-sdk](https://github.com/larksuite/node-sdk) Client + WSClient 长连接
+- 存储：SQLite（better-sqlite3）
+- 部署：Docker / Docker Compose
+
+---
+
+## 工作方式
+
+```mermaid
+flowchart LR
+  WA[WhatsApp] -->|群聊/私聊消息| App[WhatsLark]
+  App -->|建群/建话题/发消息| FS[飞书]
+  FS -->|用户回复事件| App
+  App -->|以本人 WA 账号发送| WA
+```
+
+### WhatsApp → 飞书
+
+1. 接收 WhatsApp 群聊或私聊消息。
+2. 自动创建或复用飞书群 / 私聊话题。
+3. 上传媒体资源并发送消息到飞书。
+4. 写入去重记录，避免重复投递。
+
+### 飞书 → WhatsApp
+
+1. 通过飞书长连接接收 `im.message.receive_v1` 事件。
+2. 过滤机器人消息，避免回环。
+3. 根据群或话题映射找到 WhatsApp 目标会话。
+4. 通过 Baileys 以当前登录的 WhatsApp 账号发送。
+
+---
 
 ## 目录结构
 
-```
+```text
 src/
-  index.ts            入口：initDb → App → Monitor
+  index.ts            入口：初始化数据库、启动 App 与 Monitor
   config.ts           环境变量配置
   logger.ts           pino 分模块日志
   types.ts            共享类型
-  db.ts               SQLite 数据层（建表/映射/去重/配置）
-  app.ts              协调层：按配置装配 WA/飞书/路由，配置热加载
-  monitor.ts          配置文件监听 + 命令文件 + 状态文件（替代 Web 配置页）
+  db.ts               SQLite 数据层：建表、映射、去重、配置、WA authState
+  app.ts              协调层：装配 WhatsApp、飞书、路由与热加载
+  monitor.ts          配置监听、命令文件处理、状态文件输出
   whatsapp/
-    auth-sqlite.ts    SQLite 版 Baileys authState（替代 useMultiFileAuthState）
-    socket.ts         WA socket：连接/重连/终端QR/消息监听/群信息/媒体
+    auth-sqlite.ts    SQLite 版 Baileys authState
+    socket.ts         WhatsApp socket：连接、重连、QR、消息、群信息、媒体
   feishu/
-    client.ts         Lark Client：建群/建话题群/发文本/话题回复/媒体/改名
-    ws.ts             WSClient 长连接：订阅 im.message.receive_v1
+    client.ts         飞书 REST Client：建群、建话题群、发消息、上传媒体、改名
+    ws.ts             飞书 WSClient 长连接：订阅消息事件
   bridge/
-    router.ts         双向路由核心：建群/话题归集/去重/防回环
-    mutex.ts          按键串行锁，防并发重复建群
+    router.ts         双向路由核心：映射、同步、去重、防回环
+    mutex.ts          按 key 串行锁，避免并发重复建群/话题
 bin/
-  whatslark.sh        CLI 命令脚本（status / feishu-config / wa-login / mappings 等）
+  whatslark.sh        容器内 CLI：status / feishu-set / wa-login / mappings 等
 ```
 
 ---
@@ -42,21 +76,35 @@ bin/
 
 ```bash
 npm install
-npm run build      # 编译 TS → dist/
-npm start          # 启动（DB ./data/bridge.db，配置 ./data/config.json）
-# 或开发模式
+npm run build
+npm start
+```
+
+开发模式：
+
+```bash
 npm run dev
 ```
 
+默认数据目录为 `./data/`：
+
+- SQLite 数据库：`./data/bridge.db`
+- 飞书配置：`./data/config.json`
+- 服务状态：`./data/status.json`
+- 一次性命令：`./data/cmd/`
+
 ---
 
-## 配置方式（配置文件 + CLI 脚本，无 Web 页面）
+## 配置方式
 
-本项目通过 **挂载的配置文件** + **docker exec CLI 命令** 管理配置，不再有 Web 配置页。
+WhatsLark 不提供 Web 配置页。所有配置和操作通过以下两种方式完成：
 
-### 飞书配置：编辑 `./data/config.json`
+1. 编辑挂载目录中的配置文件。
+2. 使用容器内 CLI：`docker exec whatslark whatslark <cmd>`。
 
-首次启动会自动生成空模板，填入飞书应用信息即可：
+### 飞书配置
+
+首次启动会在数据目录生成 `config.json` 模板：
 
 ```json
 {
@@ -67,64 +115,106 @@ npm run dev
 }
 ```
 
-- 修改后**自动热加载**（无需重启容器），飞书 Client + WSClient 自动重建。
-- 也可用 CLI 一键设置：`docker exec whatslark whatslark feishu-set cli_xxx mysecret ou_yyy`
-- ⚠️ **`my_open_id` 非常重要**：自动建的飞书群会把这个用户拉进去。**不填你就不会被拉进群、收不到任何消息**。它是你在该飞书应用下的 open_id（可在飞书开放平台调试台或事件回调里拿到）。用 `feishu-set` 省略第三个参数时会**保留原值**，不会清空。
+字段说明：
 
-### WhatsApp 登录：终端 QR
+| 字段 | 必填 | 说明 |
+|---|---:|---|
+| `app_id` | 是 | 飞书企业自建应用的 App ID |
+| `app_secret` | 是 | 飞书企业自建应用的 App Secret |
+| `my_open_id` | 强烈建议 | 自动建群时要拉入的飞书用户 open_id；不填可能看不到同步消息 |
+| `bot_open_id` | 否 | 机器人 open_id，通常可留空 |
+
+修改 `config.json` 后服务会自动热加载，无需重启容器。
+
+也可以使用 CLI 设置：
+
+```bash
+docker exec whatslark whatslark feishu-set cli_xxx mysecret ou_yyy
+```
+
+> 省略第三个参数时，CLI 会保留原有 `my_open_id`，不会清空。
+
+### 飞书开发者后台准备
+
+在飞书开放平台中创建企业自建应用，并完成以下配置：
+
+1. 开启机器人能力。
+2. 开通并发布以下权限：
+   - `im:chat:create`
+   - `im:chat:update`
+   - `im:message`
+   - `im:message:send_as_bot`
+   - `im:resource`
+   - `im:chat.members:write_only`
+3. 在「事件与回调」中订阅 `im.message.receive_v1`。
+4. 订阅方式选择长连接。通常需要先启动本服务，让长连接建立后再保存订阅配置。
+
+### WhatsApp 登录
 
 ```bash
 # 触发登录，QR 会打印到容器日志
 docker exec whatslark whatslark wa-login
 
-# 跟踪日志查看 QR 码，用手机 WhatsApp 扫码
+# 查看日志并用手机 WhatsApp 扫码
 docker compose logs -f whatslark
 ```
 
 手机端路径：**WhatsApp → 设置 → 已关联的设备 → 关联新设备 → 扫描日志里的二维码**。
 
-- 二维码每约 20 秒**自动刷新**，过期会自动重出；扫码成功后日志显示「✅ WhatsApp 已连接」。
-- 已登录时再次执行 `wa-login` **不会重复弹码**（日志提示「已处于登录状态」）。
-- 登录态存于 SQLite（`/data` 挂载），容器重建后**自动重连**，无需重新扫码。
+说明：
 
-### CLI 命令一览（`docker exec whatslark whatslark <cmd>`）
+- 二维码会周期性刷新，过期后自动重新输出。
+- 已登录时再次执行 `wa-login` 不会重复弹码。
+- 登录态保存在 SQLite 中；只要 `/data` 持久化，容器重建后可自动重连。
+
+---
+
+## CLI 命令
+
+在容器内使用：
+
+```bash
+docker exec whatslark whatslark <cmd>
+```
 
 | 命令 | 说明 |
 |---|---|
-| `whatslark status` | 查看服务状态（飞书配置、WA 连接、映射数量） |
-| `whatslark feishu-config` | 查看当前配置 |
-| `whatslark feishu-set <id> <secret> [open_id]` | 设置飞书配置（自动热加载） |
-| `whatslark wa-login` | 触发 WhatsApp 登录（QR 打印到日志） |
-| `whatslark wa-logout` | WhatsApp 登出 |
-| `whatslark mappings` | 查看消息映射表（群 + 私聊话题） |
-| `whatslark help` | 显示帮助 |
+| `status` | 查看服务状态：飞书配置、WhatsApp 连接状态、映射数量 |
+| `feishu-config` | 查看当前飞书配置，密钥会脱敏显示 |
+| `feishu-set <id> <secret> [open_id]` | 写入飞书配置并触发热加载 |
+| `wa-login` | 触发 WhatsApp 登录，QR 打印到日志 |
+| `wa-logout` | 登出 WhatsApp 并清除登录态 |
+| `mappings` | 查看 WhatsApp 与飞书的群/私聊话题映射 |
+| `help` | 显示帮助信息 |
 
-### 飞书侧一次性准备（开发者后台）
+示例：
 
-- 创建**企业自建应用**，开启**机器人**能力。
-- 开通权限 scope：`im:chat:create`、`im:chat:update`、`im:message`、`im:message:send_as_bot`、`im:resource`、`im:chat.members:write_only`，并**发布版本**。
-- 「事件与回调」订阅 `im.message.receive_v1`，订阅方式选**长连接**（需先把本服务跑起来，长连接建立后再保存）。
+```bash
+docker exec whatslark whatslark status
+docker exec whatslark whatslark feishu-config
+docker exec whatslark whatslark mappings
+```
 
 ---
 
 ## Docker 部署
 
-### 首次部署步骤
+### 首次部署
 
 ```bash
 # 1. 克隆仓库
-git clone <repo-url> && cd whatslark
+git clone <repo-url>
+cd whatslark
 
 # 2. 构建并启动
 docker compose up -d --build
 
-# 3. 配置飞书（编辑配置文件或用 CLI）
-#    方式 A：编辑 ./data/config.json 填入飞书信息（自动热加载）
-#    方式 B：docker exec whatslark whatslark feishu-set cli_xxx mysecret ou_yyy
+# 3. 配置飞书：编辑 ./data/config.json，或使用 CLI
+docker exec whatslark whatslark feishu-set cli_xxx mysecret ou_yyy
 
 # 4. 登录 WhatsApp
 docker exec whatslark whatslark wa-login
-docker compose logs -f whatslark   # 扫描终端 QR
+docker compose logs -f whatslark
 
 # 5. 验证状态
 docker exec whatslark whatslark status
@@ -132,53 +222,85 @@ docker exec whatslark whatslark status
 
 ### 数据持久化
 
-- 所有状态存于 `/data/` 目录（SQLite、WA 凭证、config.json、status.json），通过 `./data:/data` **挂载到宿主机**，容器重建数据不丢。
-- 飞书长连接为**出站**连接，无需任何入站端口映射。
+Docker Compose 默认将宿主机 `./data` 挂载到容器 `/data`。以下内容都会保存在该目录中：
 
-### 数据备份
+- SQLite 数据库
+- WhatsApp 登录凭证
+- 飞书配置文件
+- 服务状态文件
+- 一次性命令文件
+
+只要保留 `./data`，重建容器不会丢失登录态和映射关系。
+
+### 备份
 
 ```bash
-# 停止容器后直接复制数据目录
 docker compose stop
 cp -r ./data ./data-backup-$(date +%Y%m%d)
 docker compose start
 ```
 
-### 升级流程
+### 升级
 
 ```bash
-# 拉取最新代码
 git pull origin main
-
-# 重建镜像并启动（数据在宿主机 ./data 不受影响）
 docker compose up -d --build
-
-# 查看日志确认启动正常
 docker compose logs -f --tail 50
 ```
 
-### 主要环境变量
+---
 
-| 变量 | 默认 | 说明 |
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
 |---|---|---|
-| `DB_PATH` | `./data/bridge.db` | SQLite 文件路径 |
-| `SYNC_ALL_GROUPS` | `true` | 登录后全量建群（A3） |
-| `SYNC_FULL_HISTORY` | `true` | 拉取历史消息（A2） |
-| `SEND_INTERVAL_MS` / `HISTORY_INTERVAL_MS` / `GROUP_SYNC_INTERVAL_MS` | 600 / 400 / 1500 | 限速防风控 |
+| `DB_PATH` | `./data/bridge.db` | SQLite 数据库路径 |
+| `DATA_DIR` | `DB_PATH` 所在目录 | 配置文件、状态文件、命令文件目录 |
+| `LOG_LEVEL` | `info` | 日志级别 |
+| `SEND_INTERVAL_MS` | `600` | 发送消息限速间隔 |
+| `HISTORY_INTERVAL_MS` | `400` | 历史消息同步限速间隔 |
+| `GROUP_SYNC_INTERVAL_MS` | `1500` | 登录后批量建群限速间隔 |
 | `DEDUP_RETENTION_DAYS` | `7` | 去重记录保留天数 |
-| `MAX_MEDIA_BYTES` | `52428800` | 媒体最大字节数，超出降级文本 |
+| `SYNC_ALL_GROUPS` | `true` | 登录后是否自动创建所有 WhatsApp 群对应的飞书群 |
+| `SYNC_FULL_HISTORY` | `true` | 是否尝试同步 WhatsApp 历史消息 |
+| `MAX_MEDIA_BYTES` | `52428800` | 最大媒体大小；超出后降级为文本提示 |
 
-> 完整环境变量见 [`CLAUDE.md`](CLAUDE.md) 与 [`config.ts`](src/config.ts)。
+完整定义见 [`src/config.ts`](src/config.ts)。
 
 ---
 
 ## 已知限制与风险
 
-- **WhatsApp 封号风险**：Baileys 非官方库，自动化个人账号有概率被封；请用可接受被封的账号、控制频率、勿群发滥用。
-- **历史消息有限**：多设备协议下 WA 只回传有限的近期历史，并非全部聊天记录。
-- **单实例**：飞书长连接不广播 + SQLite 单写入者 → 单实例部署（无高可用需求）。
-- **媒体范围**：支持文本/图片/文件/语音（语音通过 ffmpeg 转码为 opus/ogg）；贴纸、位置、名片等降级为文本提示。飞书侧富文本回复（post：@人、加粗、链接）会自动解析为纯文本回传 WhatsApp。
-- **凭证安全**：`app_secret` 与 WA 登录凭证均**明文存于 SQLite**（`/data/bridge.db`），无 Web 端口、无入站连接，安全性完全依赖 `/data` 目录的**文件权限**——请妥善保护宿主机该目录，勿将 `./data` 提交到仓库或公开分享（`feishu-config` 输出已对 `app_secret` 脱敏，避免截图泄密）。
+- **WhatsApp 封号风险**：Baileys 是非官方库，自动化个人账号存在封号概率。建议使用可接受风险的账号，避免群发和高频操作。
+- **历史消息不完整**：WhatsApp 多设备协议通常只返回有限近期历史，不保证同步全部聊天记录。
+- **单实例部署**：飞书 WSClient 长连接不适合多实例广播，本项目按单进程单实例设计。
+- **媒体类型有限**：文本、图片、文件、语音为主要支持类型；贴纸、位置、名片等会降级为文本提示。
+- **富文本降级**：飞书富文本回复会解析为纯文本后发送到 WhatsApp。
+- **凭证安全**：`app_secret` 与 WhatsApp 登录凭证保存在 SQLite 中。请保护好宿主机 `./data` 目录，不要提交或公开分享。
+
+---
+
+## 常用排查
+
+### 看不到飞书消息
+
+1. 确认 `my_open_id` 已配置，且应用有权限把你拉进群。
+2. 执行 `docker exec whatslark whatslark status` 查看飞书与 WhatsApp 状态。
+3. 查看容器日志：`docker compose logs -f whatslark`。
+
+### WhatsApp 未连接
+
+1. 执行 `docker exec whatslark whatslark wa-login`。
+2. 在容器日志中扫描新的 QR 码。
+3. 如果登录态异常，可执行 `docker exec whatslark whatslark wa-logout` 后重新登录。
+
+### 配置修改未生效
+
+1. 确认修改的是挂载目录中的 `./data/config.json`。
+2. 检查 JSON 格式是否合法。
+3. 查看日志中是否有配置热加载或飞书重连错误。
+
+---
 
 ## License
 

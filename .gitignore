@@ -16,3 +16,6 @@ tsconfig.test.json
 # dev artifacts
 diff.patch
 spec/
+
+# Claude Code local instructions
+CLAUDE.md
